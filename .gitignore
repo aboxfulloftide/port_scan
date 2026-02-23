@@ -33,6 +33,10 @@ env/
 *.log
 logs/
 
+# Frontend
+frontend/node_modules/
+static/
+
 # Screenshots (generated at runtime)
 screenshots/
 
