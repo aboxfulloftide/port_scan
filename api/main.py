@@ -25,6 +25,7 @@ from api.schedules.router import router as schedules_router
 from api.users.router import router as users_router
 from api.wol.router import router as wol_router
 from api.subnets.router import router as subnets_router
+from api.dashboard.router import router as dashboard_router
 
 logger = logging.getLogger("api")
 
@@ -89,6 +90,7 @@ app.include_router(schedules_router, prefix="/api")
 app.include_router(users_router, prefix="/api")
 app.include_router(wol_router, prefix="/api")
 app.include_router(subnets_router, prefix="/api")
+app.include_router(dashboard_router, prefix="/api")
 
 
 @app.get("/api/health")
