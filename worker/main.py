@@ -26,6 +26,9 @@ from worker.progress import broadcast
 
 logger = logging.getLogger("worker")
 
+# Module-level registry so the cancel endpoint can look up and cancel running tasks
+running_jobs: dict[int, asyncio.Task] = {}
+
 SCREENSHOT_DIR = os.getenv(
     "SCREENSHOT_DIR",
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "screenshots")
@@ -388,7 +391,6 @@ async def worker_loop():
     Send None to the queue to shut down.
     """
     logger.info("Scan worker started")
-    running_jobs: dict[int, asyncio.Task] = {}
 
     while True:
         job_id = await job_queue.get()

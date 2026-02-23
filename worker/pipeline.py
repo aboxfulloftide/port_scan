@@ -13,6 +13,33 @@ from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger("worker.pipeline")
 
+# Registry of active nmap scanners keyed by job_id — used for hard cancellation
+_active_scanners: dict[int, list] = {}
+
+
+def _register_scanner(job_id: int, nm) -> None:
+    _active_scanners.setdefault(job_id, []).append(nm)
+
+
+def _deregister_scanner(job_id: int, nm) -> None:
+    scanners = _active_scanners.get(job_id, [])
+    if nm in scanners:
+        scanners.remove(nm)
+    if not scanners:
+        _active_scanners.pop(job_id, None)
+
+
+def kill_job_scanners(job_id: int) -> None:
+    """Kill all active nmap subprocesses for a job. Safe to call at any time."""
+    for nm in _active_scanners.pop(job_id, []):
+        try:
+            proc = getattr(nm, "_nm_proc", None)
+            if proc and proc.poll() is None:
+                proc.kill()
+                logger.info(f"[Job {job_id}] Killed nmap process (pid {proc.pid})")
+        except Exception as e:
+            logger.warning(f"[Job {job_id}] Error killing nmap process: {e}")
+
 
 async def _emit(job_id: int, event_type: str, data: dict):
     from worker.progress import broadcast
@@ -59,12 +86,16 @@ async def tier1_ping_sweep(cidr: str, job_id: int) -> List[str]:
     """Returns list of IPs that responded to ping."""
     import nmap
     nm = nmap.PortScanner()
+    _register_scanner(job_id, nm)
     await _emit(job_id, "tier_start", {"tier": 1, "name": "ICMP Ping Sweep", "target": cidr})
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        None,
-        lambda: nm.scan(hosts=cidr, arguments="-sn -PE --min-rate 500")
-    )
+    try:
+        await loop.run_in_executor(
+            None,
+            lambda: nm.scan(hosts=cidr, arguments="-sn -PE --min-rate 500")
+        )
+    finally:
+        _deregister_scanner(job_id, nm)
     live_ips = [h for h in nm.all_hosts() if nm[h].state() == "up"]
     logger.info(f"[Job {job_id}] Tier 1: {len(live_ips)} live hosts in {cidr}")
     await _emit(job_id, "tier_done", {"tier": 1, "live_count": len(live_ips)})
@@ -78,14 +109,17 @@ async def tier2_tcp_scan(ips: List[str], port_range: str, job_id: int) -> Dict[s
     if not ips:
         return {}
     nm = nmap.PortScanner()
+    _register_scanner(job_id, nm)
     targets = " ".join(ips)
-    # Try SYN scan first; fall back to connect scan if no root
     import os
     scan_type = "-sS" if os.geteuid() == 0 else "-sT"
     args = f"{scan_type} -p {port_range} --open -T4 --min-rate 300"
     await _emit(job_id, "tier_start", {"tier": 2, "name": "TCP Scan", "host_count": len(ips)})
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, lambda: nm.scan(hosts=targets, arguments=args))
+    try:
+        await loop.run_in_executor(None, lambda: nm.scan(hosts=targets, arguments=args))
+    finally:
+        _deregister_scanner(job_id, nm)
     results = {h: _parse_nmap_host(nm[h]) for h in nm.all_hosts()}
     logger.info(f"[Job {job_id}] Tier 2: scanned {len(ips)} hosts, got results for {len(results)}")
     await _emit(job_id, "tier_done", {"tier": 2, "scanned": len(results)})
@@ -99,11 +133,15 @@ async def tier3_udp_scan(ips: List[str], port_range: str, job_id: int) -> Dict[s
     if not ips:
         return {}
     nm = nmap.PortScanner()
+    _register_scanner(job_id, nm)
     targets = " ".join(ips)
     args = f"-sU -p {port_range} --open -T3"
     await _emit(job_id, "tier_start", {"tier": 3, "name": "UDP Scan", "host_count": len(ips)})
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, lambda: nm.scan(hosts=targets, arguments=args))
+    try:
+        await loop.run_in_executor(None, lambda: nm.scan(hosts=targets, arguments=args))
+    finally:
+        _deregister_scanner(job_id, nm)
     results = {h: _parse_nmap_host(nm[h]) for h in nm.all_hosts()}
     logger.info(f"[Job {job_id}] Tier 3: UDP results for {len(results)} hosts")
     await _emit(job_id, "tier_done", {"tier": 3, "scanned": len(results)})
@@ -130,12 +168,15 @@ async def tier4_fingerprint(
             continue
         port_str = ",".join(str(p) for p in ports[:100])  # cap at 100 ports
         args = f"-sV --version-intensity 5 -p {port_str} --script=banner"
+        _register_scanner(job_id, nm)
         try:
             await loop.run_in_executor(None, lambda: nm.scan(hosts=ip, arguments=args))
             if ip in nm.all_hosts():
                 results[ip] = _parse_nmap_host(nm[ip])
         except Exception as e:
             logger.warning(f"[Job {job_id}] Fingerprint failed for {ip}: {e}")
+        finally:
+            _deregister_scanner(job_id, nm)
     logger.info(f"[Job {job_id}] Tier 4: fingerprinted {len(results)} hosts")
     await _emit(job_id, "tier_done", {"tier": 4, "fingerprinted": len(results)})
     return results
@@ -166,14 +207,19 @@ async def tier5_screenshots(
     await _emit(job_id, "tier_start", {"tier": 5, "name": "Web Screenshots", "count": len(web_hosts)})
 
     async with async_playwright() as p:
+        from api.config import settings
         browser = await p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            ignore_https_errors=True,
+        )
         for entry in web_hosts:
             url = f"{entry['protocol']}://{entry['ip']}:{entry['port']}"
             fname = f"{entry['ip']}_{entry['port']}.png"
             fpath = os.path.join(screenshot_dir, fname)
             try:
-                page = await browser.new_page(viewport={"width": 1280, "height": 800})
-                await page.goto(url, timeout=8000, wait_until="domcontentloaded")
+                page = await context.new_page()
+                await page.goto(url, timeout=settings.SCREENSHOT_TIMEOUT_MS, wait_until="networkidle")
                 await page.screenshot(path=fpath, full_page=False)
                 await page.close()
                 results[f"{entry['ip']}:{entry['port']}"] = fname

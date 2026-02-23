@@ -120,10 +120,28 @@ async def cancel_scan(
     if job.status not in ("queued", "running"):
         raise HTTPException(status_code=400, detail=f"Cannot cancel a job with status '{job.status}'")
 
-    await db.execute(
-        update(ScanJob).where(ScanJob.id == job_id).values(status="cancelled")
-    )
-    await db.commit()
+    # Kill active nmap subprocesses first so threads don't linger
+    from worker.pipeline import kill_job_scanners
+    kill_job_scanners(job_id)
+
+    # Cancel the asyncio task if it's running
+    from worker.main import running_jobs
+    task = running_jobs.get(job_id)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+
+    # If job was still queued (not yet picked up), update DB directly
+    await db.refresh(job)
+    if job.status != "cancelled":
+        await db.execute(
+            update(ScanJob).where(ScanJob.id == job_id).values(status="cancelled")
+        )
+        await db.commit()
+
     return {"status": "cancelled"}
 
 

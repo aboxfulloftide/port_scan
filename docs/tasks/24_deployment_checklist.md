@@ -1,5 +1,14 @@
 # Task 24: Deployment Checklist & Go-Live
 
+## Status: COMPLETE ✅
+
+**Deviations from plan:**
+- Runs as `matheau` user (not a dedicated `netscan` system user).
+- No Alembic — schema created directly via `Base.metadata.create_all` / SQL from task docs.
+- Systemd unit grants `CAP_NET_RAW` + `CAP_NET_ADMIN` directly (no `setcap` on nmap binary needed).
+- Systemd unit at `systemd/netscan-api.service` in repo; backup script at `scripts/backup.sh`.
+- DB name is `port_scan` (not `netscan`).
+
 **Depends on:** All previous tasks  
 **Complexity:** Low  
 **Description:** Final deployment steps, security hardening, and operational runbook for going live with NetScan on the Linux server.

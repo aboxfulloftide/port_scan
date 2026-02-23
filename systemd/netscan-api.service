@@ -1,0 +1,44 @@
+# NetScan API — systemd service unit
+#
+# Deploy:
+#   sudo cp /home/matheau/code/port_scan/systemd/netscan-api.service /etc/systemd/system/netscan-api.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now netscan-api
+#
+# Manage:
+#   sudo systemctl status  netscan-api
+#   sudo systemctl restart netscan-api
+#   sudo journalctl -u netscan-api -f
+
+[Unit]
+Description=NetScan API + Scan Worker
+After=network.target mysql.service
+Wants=mysql.service
+
+[Service]
+Type=simple
+User=matheau
+Group=matheau
+WorkingDirectory=/home/matheau/code/port_scan
+EnvironmentFile=/home/matheau/code/port_scan/.env
+ExecStart=/home/matheau/code/port_scan/venv/bin/uvicorn api.main:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --workers 1 \
+    --log-level info
+
+# Restart on failure
+Restart=on-failure
+RestartSec=5
+
+# Allow nmap raw socket access (needed for SYN scan)
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=netscan-api
+
+[Install]
+WantedBy=multi-user.target

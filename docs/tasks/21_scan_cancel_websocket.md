@@ -1,5 +1,12 @@
 # Task 21: Scan Cancellation & WebSocket Endpoint
 
+## Status: COMPLETE ✅
+
+**Deviations from plan:**
+- `running_jobs` moved to module level in `worker/main.py` (plan showed it as a local variable inside `worker_loop`).
+- Hard cancellation also kills active nmap subprocesses via `kill_job_scanners()` in `worker/pipeline.py` — each tier registers/deregisters its `PortScanner` instance and we call `nm._nm_proc.kill()` on cancel. The plan did not cover this.
+- WebSocket endpoint was already implemented in Task 14 (DB-poll approach). The pub/sub approach from this task doc was not used.
+
 **Depends on:** Task 11, Task 14  
 **Complexity:** Medium  
 **Description:** Implement scan job cancellation (via asyncio task cancellation) and the WebSocket endpoint that streams live scan progress events to the browser.

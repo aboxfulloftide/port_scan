@@ -1,5 +1,11 @@
 # Task 20: Nginx Configuration
 
+## Status: COMPLETE ✅
+
+**Deviations from plan:**
+- Config saved to `nginx/netscan.conf` in the repo (not directly to `/etc/nginx/`) — deploy instructions are in the file header.
+- WebSocket location changed from `/ws/` to `/api/scans/ws/` to match the actual endpoint path and avoid conflicting with the `/api/` proxy block.
+
 **Depends on:** Task 01, Task 16  
 **Complexity:** Low  
 **Description:** Configure Nginx to serve the React SPA static files, proxy API requests to FastAPI, proxy WebSocket connections, and serve screenshot files.

@@ -1,5 +1,12 @@
 # Task 22: Playwright Setup for Web Screenshots
 
+## Status: COMPLETE ✅
+
+**Deviations from plan:**
+- `SCREENSHOT_DIR` was already in `config.py` from Task 14. Added `SCREENSHOT_TIMEOUT_MS` (default 8000ms, overridable via env).
+- Pipeline now reads `settings.SCREENSHOT_TIMEOUT_MS` instead of hardcoded 8000.
+- Test script created at `scripts/test_screenshot.py`.
+
 **Depends on:** Task 01, Task 14  
 **Complexity:** Low  
 **Description:** Install and configure Playwright (Chromium) for headless web screenshots during scans. Includes system dependencies, browser installation, and a standalone test script.

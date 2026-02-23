@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 import wakeonlan
 
 from shared.db import get_db
@@ -23,7 +24,7 @@ class WolLogOut(BaseModel):
     triggered_by: Optional[int]
     success: bool
     error_message: Optional[str]
-    sent_at: str
+    sent_at: datetime
 
     class Config:
         from_attributes = True

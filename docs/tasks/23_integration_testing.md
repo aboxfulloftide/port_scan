@@ -1,5 +1,16 @@
 # Task 23: Integration Testing
 
+## Status: COMPLETE ✅
+
+**Deviations from plan:**
+- All model field names corrected: `password_hash` (not `hashed_password`), `current_ip`/`current_mac`/`is_up` (not `ip_address`/`mac_address`/`status`), `enable_screenshot`/`max_concurrency`/`timeout_sec` (not `enable_screenshots`/`concurrency`/`timeout`).
+- `User` requires `email` field — added `email="...@test.local"` to all user fixtures.
+- `ScanJob.subnet_ids` is a JSON list, trigger body uses `{"subnet_ids": [id], "profile_id": id}`.
+- Trigger scan returns 202 (not 201); response shape is `{"job_id": ..., "status": "queued", "message": ...}`.
+- `WolLog.triggered_by` is an int FK — removed the `"manual"` string assertion; check `mac_used` instead.
+- Test DB URL derived from `DATABASE_URL` env var — replace database name with `port_scan_test`.
+- `conftest.py` drops/recreates schema on session start and tears down on session end.
+
 **Depends on:** All previous tasks  
 **Complexity:** Medium  
 **Description:** Write integration tests covering the auth flow, CRUD endpoints, scan job lifecycle, and WoL. Uses pytest + httpx AsyncClient against a test database.
