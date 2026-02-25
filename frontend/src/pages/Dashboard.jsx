@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { Play, RefreshCw } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import api from '../api/client'
 import StatusBadge from '../components/StatusBadge'
 import ScanProgressModal from '../components/ScanProgressModal'
@@ -11,13 +12,21 @@ const fetchDashboard = () => api.get('/dashboard').then(r => r.data)
 const fetchSubnets   = () => api.get('/subnets').then(r => r.data)
 const fetchProfiles  = () => api.get('/profiles').then(r => r.data)
 
-function StatCard({ label, value, color = 'text-white' }) {
-  return (
-    <div className="bg-gray-900 rounded-xl p-5 border border-gray-800">
+function StatCard({ label, value, color = 'text-white', to }) {
+  const inner = (
+    <>
       <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">{label}</div>
       <div className={`text-3xl font-bold ${color}`}>{value ?? 0}</div>
-    </div>
+    </>
   )
+  if (to) {
+    return (
+      <Link to={to} className="bg-gray-900 rounded-xl p-5 border border-gray-800 hover:border-gray-600 transition-colors block">
+        {inner}
+      </Link>
+    )
+  }
+  return <div className="bg-gray-900 rounded-xl p-5 border border-gray-800">{inner}</div>
 }
 
 function ManualScanForm({ subnets, profiles, onJobStarted }) {
@@ -114,9 +123,9 @@ export default function Dashboard() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Total Hosts"  value={stats.total_hosts} />
-        <StatCard label="Hosts Up"     value={stats.hosts_up}    color="text-green-400" />
-        <StatCard label="Hosts Down"   value={stats.hosts_down}  color="text-red-400" />
+        <StatCard label="Total Hosts"  value={stats.total_hosts}  to="/hosts" />
+        <StatCard label="Hosts Up"     value={stats.hosts_up}    color="text-green-400" to="/hosts?is_up=true" />
+        <StatCard label="Hosts Down"   value={stats.hosts_down}  color="text-red-400"   to="/hosts?is_up=false" />
         <StatCard label="Active Scans" value={stats.active_scans} color="text-blue-400" />
       </div>
 

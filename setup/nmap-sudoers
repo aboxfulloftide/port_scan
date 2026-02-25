@@ -1,0 +1,1 @@
+matheau ALL=(root) NOPASSWD: /usr/bin/nmap

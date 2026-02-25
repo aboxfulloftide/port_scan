@@ -1,6 +1,10 @@
 export function formatDate(iso) {
   if (!iso) return '—'
-  return new Date(iso).toLocaleString()
+  // Backend returns naive UTC datetimes without a timezone suffix.
+  // Appending 'Z' tells the browser to treat the value as UTC so it
+  // converts correctly to the user's local time via toLocaleString().
+  const str = /[Z+\-]\d*$/.test(iso) ? iso : iso + 'Z'
+  return new Date(str).toLocaleString()
 }
 
 export function formatDuration(startIso, endIso) {

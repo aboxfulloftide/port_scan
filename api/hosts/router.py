@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func, and_, or_
 from sqlalchemy.orm import selectinload
 from typing import Optional
+import logging
 import os
 
 from shared.db import get_db
@@ -16,6 +17,7 @@ from api.hosts.models import (
 from api.config import settings
 
 router = APIRouter(prefix="/hosts", tags=["hosts"])
+logger = logging.getLogger("api.hosts")
 
 
 @router.get("", response_model=PaginatedHosts)
@@ -169,3 +171,39 @@ async def get_screenshot(
         raise HTTPException(status_code=404, detail="Screenshot file not found on disk")
 
     return FileResponse(full_path, media_type="image/png")
+
+
+@router.post("/dhcp-sync")
+async def trigger_dhcp_sync(
+    _: User = Depends(get_current_user),
+):
+    """Manually trigger a DHCP hostname scrape from the router."""
+    from worker.dhcp_scraper import scrape_dhcp_table, update_hosts_from_dhcp
+
+    try:
+        entries = await scrape_dhcp_table()
+    except Exception as e:
+        logger.exception("DHCP scrape failed")
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": "DHCP scrape failed", "detail": str(e)},
+        )
+
+    if not entries:
+        return JSONResponse(
+            content={
+                "status": "no_data",
+                "message": "No DHCP entries found. Check router credentials, page path, and Playwright installation.",
+                "hosts_updated": 0,
+            }
+        )
+
+    result = await update_hosts_from_dhcp(entries)
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "entries_scraped": len(entries),
+            "hosts_updated": result["updated"],
+            "hosts_created": result["created"],
+        }
+    )

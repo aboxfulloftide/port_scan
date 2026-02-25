@@ -30,16 +30,31 @@ from api.dashboard.router import router as dashboard_router
 logger = logging.getLogger("api")
 
 _worker_task: asyncio.Task | None = None
+_dhcp_task: asyncio.Task | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _worker_task
+    global _worker_task, _dhcp_task
     from worker.main import worker_loop
+    from worker.dhcp_scraper import dhcp_scrape_loop
+
     _worker_task = asyncio.create_task(worker_loop(), name="scan-worker")
     logger.info("Scan worker started")
+
+    _dhcp_task = asyncio.create_task(dhcp_scrape_loop(), name="dhcp-scraper")
+
     yield
-    # Shutdown: send stop signal and wait
+
+    # Shutdown: stop DHCP scraper
+    if _dhcp_task and not _dhcp_task.done():
+        _dhcp_task.cancel()
+        try:
+            await asyncio.wait_for(_dhcp_task, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+
+    # Shutdown: send stop signal to worker and wait
     from worker.queue import job_queue
     await job_queue.put(None)
     if _worker_task and not _worker_task.done():

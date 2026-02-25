@@ -9,6 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import ipaddress
 from datetime import datetime, timezone
 from sqlalchemy import select
 
@@ -20,9 +21,11 @@ from shared.models import (
 from worker.queue import job_queue
 from worker.pipeline import (
     tier1_ping_sweep, tier2_tcp_scan, tier3_udp_scan,
-    tier4_fingerprint, tier5_screenshots, WEB_PORTS
+    tier4_fingerprint, tier5_screenshots, WEB_PORTS,
+    read_arp_cache, resolve_hostname,
 )
 from worker.progress import broadcast
+from worker.dhcp_scraper import scrape_dhcp_table, update_hosts_from_dhcp
 
 logger = logging.getLogger("worker")
 
@@ -228,17 +231,40 @@ async def run_job(job_id: int):
             # Tier 1: Ping sweep
             live_ips = await tier1_ping_sweep(cidr, job_id)
             all_live_ips.extend(live_ips)
+            live_set = set(live_ips)
 
-            if not live_ips:
-                logger.info(f"[Job {job_id}] No live hosts in {cidr}")
+            # Include known hosts from DB that didn't respond to ICMP,
+            # so they still get TCP/UDP/fingerprint scanned (some hosts
+            # are configured to ignore ping).
+            known_ips: list[str] = []
+            try:
+                network = ipaddress.ip_network(cidr, strict=False)
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(select(Host.current_ip))
+                    for (ip_str,) in result.all():
+                        if ip_str and ip_str not in live_set:
+                            try:
+                                if ipaddress.ip_address(ip_str) in network:
+                                    known_ips.append(ip_str)
+                            except ValueError:
+                                pass
+                if known_ips:
+                    logger.info(f"[Job {job_id}] Adding {len(known_ips)} known hosts (no ICMP reply) from {cidr}")
+            except ValueError:
+                pass
+
+            scan_ips = live_ips + known_ips
+
+            if not scan_ips:
+                logger.info(f"[Job {job_id}] No hosts to scan in {cidr}")
                 continue
 
             # Tier 2: TCP scan
-            tcp_results = await tier2_tcp_scan(live_ips, profile.port_range, job_id)
+            tcp_results = await tier2_tcp_scan(scan_ips, profile.port_range, job_id, profile.max_concurrency)
 
             # Tier 3: UDP scan (optional)
             if profile.enable_udp:
-                udp_results = await tier3_udp_scan(live_ips, profile.port_range, job_id)
+                udp_results = await tier3_udp_scan(scan_ips, profile.port_range, job_id, profile.max_concurrency)
                 for ip, data in udp_results.items():
                     if ip in tcp_results:
                         tcp_results[ip]["ports"].extend(data["ports"])
@@ -263,7 +289,8 @@ async def run_job(job_id: int):
             fp_results = await tier4_fingerprint(
                 [ip for ip, ports in open_ports_map.items() if ports],
                 open_ports_map,
-                job_id
+                job_id,
+                profile.max_concurrency,
             )
             # Merge fingerprint data into results (richer service info)
             for ip, fp_data in fp_results.items():
@@ -271,6 +298,11 @@ async def run_job(job_id: int):
                     # Replace ports with enriched version
                     all_results[ip]["ports"] = fp_data["ports"]
                     all_results[ip]["os_guess"] = fp_data.get("os_guess") or all_results[ip].get("os_guess")
+
+        # Supplement nmap MAC data with the OS ARP cache.
+        # nmap only returns MACs when running as root on a directly-connected subnet;
+        # the ARP cache is populated by any network traffic and needs no privileges.
+        arp_cache = read_arp_cache()
 
         # Persist hosts and ports
         total_new_hosts = 0
@@ -280,8 +312,10 @@ async def run_job(job_id: int):
 
         async with AsyncSessionLocal() as db:
             for ip, data in all_results.items():
+                mac = data.get("mac") or arp_cache.get(ip)
+                hostname = data.get("hostname") or resolve_hostname(ip)
                 host, is_new = await resolve_host(
-                    db, ip, data.get("hostname"), data.get("mac")
+                    db, ip, hostname, mac
                 )
                 host.os_guess = data.get("os_guess") or host.os_guess
                 host.vendor = data.get("vendor") or host.vendor
@@ -306,10 +340,18 @@ async def run_job(job_id: int):
 
             await db.commit()
 
+        # Enrich hostnames from router DHCP table
+        try:
+            dhcp_entries = await scrape_dhcp_table()
+            if dhcp_entries:
+                await update_hosts_from_dhcp(dhcp_entries)
+        except Exception as e:
+            logger.warning(f"[Job {job_id}] DHCP scrape failed (non-fatal): {e}")
+
         # Tier 5: Screenshots
         screenshot_map: dict = {}
         if profile.enable_screenshot and web_targets:
-            screenshot_map = await tier5_screenshots(web_targets, job_id, SCREENSHOT_DIR)
+            screenshot_map = await tier5_screenshots(web_targets, job_id, SCREENSHOT_DIR, min(profile.max_concurrency, 5))
 
             # Persist screenshot records
             async with AsyncSessionLocal() as db:

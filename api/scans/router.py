@@ -153,38 +153,67 @@ async def scan_progress_ws(websocket: WebSocket, job_id: int):
         return
 
     await websocket.accept()
+
+    from worker.progress import subscribe, unsubscribe
+    q = subscribe(job_id)
     try:
-        while True:
-            async with AsyncSessionLocal() as db:
-                job = await db.get(ScanJob, job_id)
-                if not job:
-                    await websocket.send_json({"type": "error", "message": "Job not found"})
-                    break
-
-                if job.status in ("completed", "failed", "cancelled"):
-                    await websocket.send_json({
-                        "type": "completed" if job.status == "completed" else job.status,
-                        "job_id": job_id,
-                        "summary": {
-                            "hosts_discovered": job.hosts_discovered,
-                            "hosts_up": job.hosts_up,
-                            "new_hosts_found": job.new_hosts_found,
-                            "new_ports_found": job.new_ports_found,
-                            "status": job.status
-                        }
-                    })
-                    break
-
+        # Send current job state immediately on connect
+        async with AsyncSessionLocal() as db:
+            job = await db.get(ScanJob, job_id)
+            if not job:
+                await websocket.send_json({"type": "error", "message": "Job not found"})
+                return
+            # If already done, send terminal event and exit
+            if job.status in ("completed", "failed", "cancelled"):
                 await websocket.send_json({
-                    "type": "progress",
+                    "type": job.status,
                     "job_id": job_id,
-                    "status": job.status,
                     "hosts_up": job.hosts_up or 0,
                     "new_hosts_found": job.new_hosts_found or 0,
-                    "new_ports_found": job.new_ports_found or 0
+                    "new_ports_found": job.new_ports_found or 0,
+                    "status": job.status,
                 })
+                await websocket.close()
+                return
+            # Send initial progress snapshot
+            await websocket.send_json({
+                "type": "progress",
+                "job_id": job_id,
+                "status": job.status,
+                "hosts_up": job.hosts_up or 0,
+                "new_hosts_found": job.new_hosts_found or 0,
+                "new_ports_found": job.new_ports_found or 0,
+            })
 
-            await asyncio.sleep(PROGRESS_POLL_INTERVAL)
+        # Stream live events from the broadcast queue
+        while True:
+            try:
+                event = await asyncio.wait_for(q.get(), timeout=PROGRESS_POLL_INTERVAL)
+            except asyncio.TimeoutError:
+                # Heartbeat: re-check DB to pick up stats updates
+                try:
+                    async with AsyncSessionLocal() as db:
+                        job = await db.get(ScanJob, job_id)
+                    if job:
+                        await websocket.send_json({
+                            "type": "progress",
+                            "job_id": job_id,
+                            "status": job.status,
+                            "hosts_up": job.hosts_up or 0,
+                            "new_hosts_found": job.new_hosts_found or 0,
+                            "new_ports_found": job.new_ports_found or 0,
+                        })
+                except Exception:
+                    pass
+                continue
+
+            await websocket.send_json(event)
+            # Stop streaming once a terminal event is sent
+            if event.get("type") in ("completed", "failed", "cancelled", "job_done"):
+                await websocket.close()
+                break
 
     except WebSocketDisconnect:
         pass
+    finally:
+        unsubscribe(job_id, q)

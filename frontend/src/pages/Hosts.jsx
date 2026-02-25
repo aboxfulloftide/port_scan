@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
-import { Search } from 'lucide-react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link, useSearchParams } from 'react-router-dom'
+import { Search, RefreshCw } from 'lucide-react'
 import api from '../api/client'
 import StatusBadge from '../components/StatusBadge'
 import { formatDate } from '../utils/format'
@@ -9,8 +9,12 @@ import { formatDate } from '../utils/format'
 const PER_PAGE = 50
 
 export default function Hosts() {
+  const [searchParams] = useSearchParams()
+  const queryClient = useQueryClient()
+  const [syncing, setSyncing] = useState(false)
+  const [syncMsg, setSyncMsg] = useState(null)
   const [search,   setSearch]   = useState('')
-  const [isUp,     setIsUp]     = useState('')
+  const [isUp,     setIsUp]     = useState(searchParams.get('is_up') ?? '')
   const [subnetId, setSubnetId] = useState('')
   const [page,     setPage]     = useState(1)
 
@@ -37,11 +41,44 @@ export default function Hosts() {
 
   const setFilter = (setter) => (e) => { setter(e.target.value); setPage(1) }
 
+  const handleDhcpSync = async () => {
+    setSyncing(true)
+    setSyncMsg(null)
+    try {
+      const res = await api.post('/hosts/dhcp-sync')
+      const d = res.data
+      if (!d || typeof d !== 'object') {
+        setSyncMsg('DHCP sync completed (no response body)')
+      } else {
+        setSyncMsg(d.status === 'ok'
+          ? `Synced ${d.entries_scraped} entries — updated ${d.hosts_updated}, created ${d.hosts_created || 0}`
+          : d.message || 'No data returned')
+      }
+      queryClient.invalidateQueries({ queryKey: ['hosts'] })
+    } catch (e) {
+      setSyncMsg(e.response?.data?.detail || 'DHCP sync failed')
+    } finally {
+      setSyncing(false)
+      setTimeout(() => setSyncMsg(null), 5000)
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Hosts</h1>
-        <span className="text-sm text-gray-500">{total} total</span>
+        <div className="flex items-center gap-3">
+          {syncMsg && <span className="text-xs text-gray-400">{syncMsg}</span>}
+          <button
+            onClick={handleDhcpSync}
+            disabled={syncing}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-gray-800 border border-gray-700 rounded-lg hover:bg-gray-700 disabled:opacity-50 transition-colors"
+          >
+            <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />
+            {syncing ? 'Syncing…' : 'Sync DHCP'}
+          </button>
+          <span className="text-sm text-gray-500">{total} total</span>
+        </div>
       </div>
 
       {/* Filters */}

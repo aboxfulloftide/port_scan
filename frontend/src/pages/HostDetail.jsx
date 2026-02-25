@@ -152,10 +152,27 @@ export default function HostDetail() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800">
-                {host.ports?.map(p => (
+                {host.ports?.map(p => {
+                  const WEB_PORTS = new Set([80, 443, 8080, 8443, 8000, 8888, 3000])
+                  const svc = (p.service_name || '').toLowerCase()
+                  const isWeb = p.protocol === 'tcp' && (WEB_PORTS.has(p.port) || svc.includes('http'))
+                  const webUrl = isWeb
+                    ? `${p.port === 443 || p.port === 8443 || svc.includes('https') ? 'https' : 'http'}://${host.current_ip}:${p.port}`
+                    : null
+                  return (
                   <tr key={p.id} className="hover:bg-gray-800/40">
-                    <td className="px-4 py-2 font-mono font-bold text-blue-300">
-                      {p.port}
+                    <td className="px-4 py-2 font-mono font-bold">
+                      {webUrl ? (
+                        <button
+                          onClick={() => window.open(webUrl, '_blank', 'noopener,noreferrer')}
+                          className="text-blue-400 hover:text-blue-300 hover:underline"
+                          title={`Open ${webUrl}`}
+                        >
+                          {p.port}
+                        </button>
+                      ) : (
+                        <span className="text-blue-300">{p.port}</span>
+                      )}
                       {p.is_new && (
                         <span className="ml-2 text-xs bg-purple-500/20 text-purple-400 px-1.5 py-0.5 rounded-full">new</span>
                       )}
@@ -178,7 +195,8 @@ export default function HostDetail() {
                       ) : '—'}
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           )}

@@ -11,3 +11,4 @@ pydantic[email]>=2.5.0
 croniter>=1.4.1
 wakeonlan>=3.1.0
 python-nmap>=0.7.1
+playwright>=1.42.0

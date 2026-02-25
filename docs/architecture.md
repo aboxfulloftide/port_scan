@@ -162,6 +162,12 @@ Tier 6: Web Screenshot           ~seconds    → Playwright on HTTP/HTTPS ports
 - Tiers 3-6: Run per-host after that host is confirmed up
 - Screenshot: Only triggered on ports 80, 443, 8080, 8443, and any port returning HTTP banner
 
+**ICMP-silent host handling:**
+After the ping sweep, the worker queries the database for all known hosts in the target subnet(s) that did not respond to ICMP. These hosts are added to the TCP/UDP/fingerprint scan targets automatically, so hosts that block ping still get fully scanned.
+
+**DHCP hostname enrichment:**
+After scan results are persisted, the worker scrapes the router's DHCP client table (via Playwright) and updates host records with DHCP-assigned hostnames and MAC addresses. Unmatched DHCP entries create new host records with auto-assigned subnets.
+
 ---
 
 ## 6. Host Identity Resolution
@@ -184,7 +190,8 @@ Does a host with this hostname exist in DB?
 1. nmap reverse DNS lookup
 2. NetBIOS/mDNS name (via nmap scripts)
 3. PTR record query
-4. Fallback: use IP as identifier
+4. DHCP client table from router (post-scan enrichment)
+5. Fallback: use IP as identifier
 
 ---
 

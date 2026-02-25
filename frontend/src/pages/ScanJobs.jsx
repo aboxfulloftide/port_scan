@@ -23,7 +23,7 @@ export default function ScanJobs() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['scan-jobs'] }),
   })
 
-  const jobs = data?.jobs ?? []
+  const jobs = data?.scans ?? []
   const total = data?.total ?? 0
   const totalPages = Math.ceil(total / perPage)
 

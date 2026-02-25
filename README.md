@@ -13,6 +13,7 @@ An internal network port and IP scanner built for homelabs and small networks. D
 | Auth | JWT via httpOnly cookies (access 8hr / refresh 7d) |
 | Scan engine | python-nmap (nmap) |
 | Screenshots | Playwright (Chromium) |
+| DHCP scraper | Playwright (TP-Link router API) |
 | Frontend | React 18 + Vite + TailwindCSS |
 | State | TanStack Query v5 |
 | Wake-on-LAN | wakeonlan |
@@ -39,7 +40,8 @@ port_scan/
 │   ├── queue.py            # asyncio.Queue shared with API
 │   ├── pipeline.py         # 5-tier nmap scan pipeline + hard cancel
 │   ├── progress.py         # WebSocket pub/sub broadcast
-│   └── main.py             # Job orchestration + host persistence
+│   ├── main.py             # Job orchestration + host persistence
+│   └── dhcp_scraper.py     # TP-Link router DHCP hostname scraper
 ├── shared/
 │   ├── db.py               # Async engine, session factory
 │   └── models.py           # 13 SQLAlchemy ORM models
@@ -84,7 +86,7 @@ port_scan/
 - **Auth** — login with rate limiting (10/min), httpOnly cookie tokens, refresh token rotation, logout with revocation, role-based guards (`viewer` / `operator` / `admin`)
 - **Users API** — CRUD for user accounts (admin only)
 - **Subnets API** — manage target subnets with CIDR validation
-- **Hosts API** — paginated host list with filters (subnet, up/down, new, search), full detail with ports, banners, history, screenshot serving
+- **Hosts API** — paginated host list with filters (subnet, up/down, new, search), full detail with ports, banners, history, screenshot serving, DHCP sync from router
 - **Scan Profiles API** — configurable scan profiles (port range, tiers to enable, concurrency, timeout)
 - **Scan Jobs API** — trigger manual scans, list history with pagination, get live job status, hard-cancel queued/running jobs (kills nmap subprocess)
 - **WebSocket** — live scan progress at `/api/scans/ws/{job_id}`
@@ -104,13 +106,25 @@ Runs in-process as an asyncio task. Executes a 5-tier pipeline per subnet:
 | 4 | Service fingerprinting + banner grab | nmap `-sV --script=banner` |
 | 5 | Web screenshots | Playwright (Chromium) |
 
+After the ICMP sweep, known hosts from the database that didn't respond to ping are automatically included in TCP/UDP/fingerprint scans — catching hosts that block ICMP.
+
 Host identity resolved by hostname-first lookup (IP fallback). IP/MAC drift logged to `host_history`. Ports upserted with service name, version, and banner. New hosts and ports flagged `is_new=True`. Hard cancel kills nmap subprocesses immediately.
+
+### DHCP Hostname Scraper
+
+Scrapes the TP-Link router's DHCP client table to enrich host records with hostnames and MAC addresses. Supports:
+
+- **Manual sync** — "Sync DHCP" button on the Hosts page (`POST /api/hosts/dhcp-sync`)
+- **Auto sync** — periodic background task (configurable via `DHCP_SCRAPE_INTERVAL_MIN`)
+- **Host creation** — DHCP entries that don't match an existing host are created as new records with subnet auto-assignment
+
+Authenticates via the router's JS widget encryption (RSA-encrypted password + stok session token).
 
 ### Frontend
 
 - Dark sidebar layout — Dashboard, Hosts, Subnets, Profiles, Scan Jobs, Schedules, Settings
 - Dashboard with stat cards, subnet bar chart, manual scan trigger, recent jobs table
-- Hosts list with search/filter, host detail with ports, banners, history diff, WoL button
+- Hosts list with search/filter, DHCP sync button, host detail with ports, banners, history diff, WoL button
 - Admin pages: subnet CRUD, profile card grid, schedule management, user management
 - Live scan progress WebSocket overlay (`ScanProgressModal`)
 - Auth context with auto-refresh on 401
@@ -235,6 +249,12 @@ JWT_ACCESS_EXPIRE_MINUTES=480
 JWT_REFRESH_EXPIRE_DAYS=7
 SCREENSHOT_DIR=/home/matheau/code/port_scan/screenshots
 SCREENSHOT_TIMEOUT_MS=8000
+
+# DHCP hostname scraper (TP-Link router)
+ROUTER_URL=https://192.168.1.1
+ROUTER_USERNAME=admin
+ROUTER_PASSWORD=your-router-password
+DHCP_SCRAPE_INTERVAL_MIN=30
 ```
 
 ---
