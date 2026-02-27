@@ -259,17 +259,27 @@ async def run_job(job_id: int):
                 logger.info(f"[Job {job_id}] No hosts to scan in {cidr}")
                 continue
 
-            # Tier 2: TCP scan
-            tcp_results = await tier2_tcp_scan(scan_ips, profile.port_range, job_id, profile.max_concurrency)
+            # Tier 2 + 3: TCP and UDP in parallel (UDP optional)
+            tcp_task = asyncio.create_task(
+                tier2_tcp_scan(scan_ips, profile.port_range, job_id, profile.max_concurrency)
+            )
+            udp_task = (
+                asyncio.create_task(
+                    tier3_udp_scan(scan_ips, profile.port_range, job_id, profile.max_concurrency)
+                )
+                if profile.enable_udp
+                else None
+            )
 
-            # Tier 3: UDP scan (optional)
-            if profile.enable_udp:
-                udp_results = await tier3_udp_scan(scan_ips, profile.port_range, job_id, profile.max_concurrency)
+            if udp_task:
+                tcp_results, udp_results = await asyncio.gather(tcp_task, udp_task)
                 for ip, data in udp_results.items():
                     if ip in tcp_results:
                         tcp_results[ip]["ports"].extend(data["ports"])
                     else:
                         tcp_results[ip] = data
+            else:
+                tcp_results = await tcp_task
 
             all_results.update(tcp_results)
 
