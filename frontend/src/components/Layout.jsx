@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useAuth } from '../hooks/useAuth'
 import {
   LayoutDashboard, Monitor, Network, ScanLine,
-  Clock, CalendarClock, Settings, LogOut, Radar
+  Clock, CalendarClock, Settings, LogOut, Radar, Wifi
 } from 'lucide-react'
 import api from '../api/client'
 import ScanProgressModal from './ScanProgressModal'
@@ -15,8 +15,9 @@ const nav = [
   { to: '/subnets',   icon: Network,         label: 'Subnets' },
   { to: '/profiles',  icon: ScanLine,        label: 'Scan Profiles' },
   { to: '/scans',     icon: Clock,           label: 'Scan Jobs' },
-  { to: '/schedules', icon: CalendarClock,   label: 'Schedules' },
-  { to: '/settings',  icon: Settings,        label: 'Settings' },
+  { to: '/schedules',     icon: CalendarClock, label: 'Schedules' },
+  { to: '/wireless-aps', icon: Wifi,          label: 'Wireless APs' },
+  { to: '/settings',     icon: Settings,      label: 'Settings' },
 ]
 
 export default function Layout() {

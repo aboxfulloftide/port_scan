@@ -137,16 +137,29 @@ def _parse_nmap_host(host_data) -> Dict[str, Any]:
 # ── Tier 1: ICMP Ping Sweep ───────────────────────────────────────────────────
 
 async def tier1_ping_sweep(cidr: str, job_id: int) -> List[str]:
-    """Returns list of IPs that responded to ping."""
+    """
+    Returns list of IPs that are up. Uses multiple probe types so hosts that
+    silently drop ICMP (e.g. Windows firewall, some IoT devices) are still found:
+      -PE  ICMP echo
+      -PP  ICMP timestamp
+      -PS  TCP SYN to common service ports
+      -PA  TCP ACK to HTTP/HTTPS (catches hosts that only respond to ACK)
+    ARP is used automatically by nmap for local subnets when running as root.
+    """
     import nmap
     nm = nmap.PortScanner(nmap_search_path=NMAP_SEARCH_PATH)
     _register_scanner(job_id, nm)
-    await _emit(job_id, "tier_start", {"tier": 1, "name": "ICMP Ping Sweep", "target": cidr})
+    await _emit(job_id, "tier_start", {"tier": 1, "name": "Host Discovery", "target": cidr})
     loop = asyncio.get_event_loop()
+    # TCP SYN/ACK probes require raw sockets (root); fall back gracefully when unavailable.
+    if _can_use_raw_sockets():
+        probe_args = "-sn -PE -PP -PS22,80,443,3389,8080,8443 -PA80,443 --min-rate 500"
+    else:
+        probe_args = "-sn -PE --min-rate 500"
     try:
         await loop.run_in_executor(
             None,
-            lambda: nm.scan(hosts=cidr, arguments="-sn -PE --min-rate 500")
+            lambda: nm.scan(hosts=cidr, arguments=probe_args)
         )
     finally:
         _deregister_scanner(job_id, nm)

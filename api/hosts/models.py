@@ -50,6 +50,28 @@ class HostHistoryOut(BaseModel):
         from_attributes = True
 
 
+class HostNetworkIdOut(BaseModel):
+    id: int
+    ip_address: str
+    mac_address: Optional[str]
+    source: str
+    first_seen: datetime
+    last_seen: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class HostAliasSummary(BaseModel):
+    id: int
+    hostname: Optional[str]
+    current_ip: str
+    current_mac: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
 class HostSummaryOut(BaseModel):
     id: int
     hostname: Optional[str]
@@ -63,6 +85,11 @@ class HostSummaryOut(BaseModel):
     first_seen: datetime
     last_seen: Optional[datetime]
     open_port_count: int = 0
+    bandwidth_1h: int = 0
+    alias_count: int = 0
+    primary_host_id: Optional[int] = None
+    connection_type: Optional[str] = None
+    notes: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -81,17 +108,41 @@ class HostDetailOut(BaseModel):
     notes: Optional[str]
     first_seen: datetime
     last_seen: Optional[datetime]
+    primary_host_id: Optional[int] = None
     ports: List[HostPortOut] = []
     history: List[HostHistoryOut] = []
+    aliases: List[HostAliasSummary] = []
+    network_ids: List[HostNetworkIdOut] = []
 
     class Config:
         from_attributes = True
 
 
 class HostUpdate(BaseModel):
+    hostname: Optional[str] = None
     notes: Optional[str] = None
     wol_enabled: Optional[bool] = None
     is_new: Optional[bool] = None
+
+
+class MergeSuggestion(BaseModel):
+    reason: str
+    hosts: List[HostSummaryOut]
+
+
+class MergeRequest(BaseModel):
+    primary_host_id: int
+    alias_host_ids: List[int]
+
+
+class IgnoreRequest(BaseModel):
+    host_ids: List[int]
+
+
+class IgnoredGroupOut(BaseModel):
+    host_ids: List[int]
+    hosts: List[HostSummaryOut]
+    dismissed_at: datetime
 
 
 class PaginatedHosts(BaseModel):

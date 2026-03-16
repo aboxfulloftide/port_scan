@@ -107,6 +107,7 @@ Runs in-process as an asyncio task. Executes a 5-tier pipeline per subnet:
 | 5 | Web screenshots | Playwright (Chromium) |
 
 After the ICMP sweep, known hosts from the database that didn't respond to ping are automatically included in TCP/UDP/fingerprint scans — catching hosts that block ICMP.
+TCP and UDP scan tiers run in parallel when UDP is enabled, then results are merged before fingerprinting.
 
 Host identity resolved by hostname-first lookup (IP fallback). IP/MAC drift logged to `host_history`. Ports upserted with service name, version, and banner. New hosts and ports flagged `is_new=True`. Hard cancel kills nmap subprocesses immediately.
 

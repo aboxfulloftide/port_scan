@@ -1,9 +1,10 @@
 from datetime import datetime
 from typing import Optional
 from sqlalchemy import (
-    Integer, String, Boolean, DateTime, Text, Enum,
+    Integer, BigInteger, String, Boolean, DateTime, Text, Enum,
     ForeignKey, JSON, SmallInteger, UniqueConstraint, Index
 )
+from sqlalchemy.dialects.mysql import INTEGER as MySQLInteger
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from shared.db import Base
 
@@ -53,7 +54,7 @@ class Host(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     hostname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     current_ip: Mapped[str] = mapped_column(String(45), nullable=False, index=True)
-    current_mac: Mapped[Optional[str]] = mapped_column(String(17), nullable=True, index=True)
+    current_mac: Mapped[Optional[str]] = mapped_column(String(17), nullable=True, index=True, unique=True)
     subnet_id: Mapped[Optional[int]] = mapped_column(ForeignKey("subnets.id", ondelete="SET NULL"), nullable=True)
     vendor: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     os_guess: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -63,10 +64,23 @@ class Host(Base):
     last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     wol_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    connection_type: Mapped[Optional[str]] = mapped_column(Enum("wired", "wireless"), nullable=True)
+    primary_host_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("hosts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     subnet: Mapped[Optional["Subnet"]] = relationship("Subnet")
     ports: Mapped[list["HostPort"]] = relationship("HostPort", back_populates="host", cascade="all, delete-orphan")
     history: Mapped[list["HostHistory"]] = relationship("HostHistory", back_populates="host", cascade="all, delete-orphan")
+    network_ids: Mapped[list["HostNetworkId"]] = relationship("HostNetworkId", back_populates="host", cascade="all, delete-orphan")
+    aliases: Mapped[list["Host"]] = relationship(
+        "Host", back_populates="primary_host",
+        foreign_keys="[Host.primary_host_id]",
+    )
+    primary_host: Mapped[Optional["Host"]] = relationship(
+        "Host", back_populates="aliases",
+        remote_side="[Host.id]", foreign_keys="[Host.primary_host_id]",
+    )
 
 
 class HostHistory(Base):
@@ -81,6 +95,35 @@ class HostHistory(Base):
     recorded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
     host: Mapped["Host"] = relationship("Host", back_populates="history")
+
+
+class HostNetworkId(Base):
+    __tablename__ = "host_network_ids"
+    __table_args__ = (
+        UniqueConstraint("host_id", "ip_address", "mac_address", name="uq_host_ip_mac"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    host_id: Mapped[int] = mapped_column(ForeignKey("hosts.id", ondelete="CASCADE"), nullable=False, index=True)
+    ip_address: Mapped[str] = mapped_column(String(45), nullable=False, index=True)
+    mac_address: Mapped[Optional[str]] = mapped_column(String(17), nullable=True, index=True)
+    source: Mapped[str] = mapped_column(Enum("scan", "dhcp", "manual"), nullable=False, default="scan")
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    host: Mapped["Host"] = relationship("Host", back_populates="network_ids")
+
+
+class HostMergeLog(Base):
+    __tablename__ = "host_merge_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    primary_host_id: Mapped[int] = mapped_column(ForeignKey("hosts.id", ondelete="CASCADE"), nullable=False)
+    alias_host_id: Mapped[int] = mapped_column(ForeignKey("hosts.id", ondelete="CASCADE"), nullable=False)
+    action: Mapped[str] = mapped_column(Enum("merge", "unmerge"), nullable=False)
+    performed_by: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    performed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    snapshot: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
 
 class HostPort(Base):
@@ -201,6 +244,52 @@ class WolSchedule(Base):
     host: Mapped["Host"] = relationship("Host")
 
 
+class InterfaceTrafficSnapshot(Base):
+    __tablename__ = "interface_traffic_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    interface: Mapped[str] = mapped_column(String(32), nullable=False)
+    bytes_sent: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    bytes_recv: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    packets_sent: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    packets_recv: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    scraped_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class HostTrafficSnapshot(Base):
+    __tablename__ = "host_traffic_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ip_address: Mapped[str] = mapped_column(String(45), nullable=False, index=True)
+    host_id: Mapped[Optional[int]] = mapped_column(MySQLInteger(unsigned=True), ForeignKey("hosts.id", ondelete="SET NULL"), nullable=True)
+    bytes_sent: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    bytes_recv: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    packets_sent: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    packets_recv: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    scraped_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    host: Mapped[Optional["Host"]] = relationship("Host")
+
+
+class MergeSuggestionIgnore(Base):
+    __tablename__ = "merge_suggestion_ignores"
+    __table_args__ = (
+        UniqueConstraint("host_id_a", "host_id_b", name="uq_ignore_pair"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    host_id_a: Mapped[int] = mapped_column(
+        MySQLInteger(unsigned=True), ForeignKey("hosts.id", ondelete="CASCADE"), nullable=False
+    )
+    host_id_b: Mapped[int] = mapped_column(
+        MySQLInteger(unsigned=True), ForeignKey("hosts.id", ondelete="CASCADE"), nullable=False
+    )
+    dismissed_by: Mapped[Optional[int]] = mapped_column(
+        MySQLInteger(unsigned=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    dismissed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class WolLog(Base):
     __tablename__ = "wol_log"
 
@@ -212,3 +301,44 @@ class WolLog(Base):
     success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class WirelessAP(Base):
+    __tablename__ = "wireless_aps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    brand: Mapped[str] = mapped_column(Enum("tplink_deco", "netgear"), nullable=False)
+    url: Mapped[str] = mapped_column(String(255), nullable=False)
+    username: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    password_enc: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_scraped: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    scrape_interval_min: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=5)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    clients: Mapped[list["HostWirelessClient"]] = relationship(
+        "HostWirelessClient", back_populates="ap", cascade="all, delete-orphan"
+    )
+
+
+class HostWirelessClient(Base):
+    __tablename__ = "host_wireless_clients"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ap_id: Mapped[int] = mapped_column(ForeignKey("wireless_aps.id", ondelete="CASCADE"), nullable=False)
+    host_id: Mapped[Optional[int]] = mapped_column(
+        MySQLInteger(unsigned=True), ForeignKey("hosts.id", ondelete="SET NULL"), nullable=True
+    )
+    mac_address: Mapped[str] = mapped_column(String(17), nullable=False, index=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
+    hostname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    ssid: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    band: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    signal_dbm: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    ap: Mapped["WirelessAP"] = relationship("WirelessAP", back_populates="clients")
+    host: Mapped[Optional["Host"]] = relationship("Host")

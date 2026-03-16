@@ -8,25 +8,18 @@ DHCP_SCRAPE_INTERVAL_MIN env var).
 """
 import asyncio
 import ipaddress
-import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import select
 
 from api.config import settings
 from shared.db import AsyncSessionLocal
-from shared.models import Host, HostHistory, Subnet
+from shared.models import Host, HostHistory, HostNetworkId, Subnet
+from worker.router_auth import RouterLoginError, login_and_get_stok, make_router_api_call
 
 logger = logging.getLogger("worker.dhcp_scraper")
-
-
-class RouterLoginError(Exception):
-    def __init__(self, code: str, message: str, data: Optional[dict] = None):
-        super().__init__(message)
-        self.code = code
-        self.data = data or {}
 
 
 async def scrape_dhcp_table() -> list[dict]:
@@ -60,7 +53,7 @@ async def scrape_dhcp_table() -> list[dict]:
             await page.goto(router_url, timeout=15000, wait_until="networkidle")
 
             # Step 2: Log in and obtain stok session token
-            stok = await _login_and_get_stok(page, router_url, settings.ROUTER_USERNAME, settings.ROUTER_PASSWORD)
+            stok = await login_and_get_stok(page, router_url, settings.ROUTER_USERNAME, settings.ROUTER_PASSWORD)
 
             if not stok:
                 logger.error("Login succeeded but no stok token received")
@@ -69,32 +62,9 @@ async def scrape_dhcp_table() -> list[dict]:
             logger.info("Router login successful, got stok token")
 
             # Step 3: Fetch DHCP client list using stok-authenticated API
-            dhcp_url = f"{router_url}/cgi-bin/luci/;stok={stok}/admin/dhcps?form=client"
-            result = await page.evaluate("""
-                async (url) => {
-                    const body = "data=" + encodeURIComponent(JSON.stringify({method: "get", params: {}}));
-                    const res = await fetch(url, {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                            "X-Requested-With": "XMLHttpRequest",
-                        },
-                        body,
-                        credentials: "include",
-                    });
-                    const text = await res.text();
-                    return { ok: res.ok, status: res.status, text };
-                }
-            """, dhcp_url)
-
-            if not result or not result.get("ok"):
-                logger.warning(f"DHCP API request failed: HTTP {result.get('status') if result else 'unknown'}")
-                return []
-
-            data = json.loads(result.get("text") or "{}")
-            err_code = str(data.get("error_code", ""))
-            if err_code and err_code != "0":
-                logger.warning(f"DHCP API returned error_code={err_code}")
+            data = await make_router_api_call(page, stok, router_url, "dhcps", "client")
+            if not data:
+                logger.warning("DHCP API request failed or returned error")
                 return []
 
             dhcp_list = data.get("result")
@@ -122,94 +92,6 @@ async def scrape_dhcp_table() -> list[dict]:
     return entries
 
 
-# ── Login ────────────────────────────────────────────────────────────────────
-
-async def _login_and_get_stok(page, router_url: str, username: str, password: str) -> Optional[str]:
-    """
-    Log into a TP-Link router using the JS widget encryption and return the stok token.
-    The stok must be included in all subsequent API URL paths.
-    """
-    # Ensure we're on the login page
-    try:
-        if "/webpages/login.html" not in page.url:
-            await page.goto(f"{router_url}/webpages/login.html", timeout=10000, wait_until="networkidle")
-    except Exception:
-        pass
-
-    # Wait for TP-Link JS framework
-    await page.wait_for_function("window.$ && $.su && $.su.url", timeout=8000)
-
-    # Fill inputs, encrypt password, and read the encrypted value from .val()
-    # IMPORTANT: After doEncrypt, the encrypted password is in .val(), NOT .getValue().
-    # .getValue() still returns plaintext which causes error_code=700.
-    creds = await page.evaluate(
-        """
-        ({ username, password }) => {
-            try { $("#login-username").textbox("setValue", username); } catch (e) { $("#login-username").val(username); }
-            try { $("#login-password").password("setValue", password); } catch (e) { $("#login-password").val(password); }
-
-            try { $("#login-password").password("doEncrypt"); } catch (e) {}
-
-            let enc = null;
-            try { enc = $("#login-password").val(); } catch (e) {}
-            if (!enc) { try { enc = $("input[name='password']").val(); } catch (e) {} }
-
-            return { enc, url: $.su.url("/login?form=login") };
-        }
-        """,
-        {"username": username, "password": password},
-    )
-
-    login_url = creds.get("url") if isinstance(creds, dict) else "/login?form=login"
-    enc = creds.get("enc") if isinstance(creds, dict) else None
-    if not enc:
-        enc = password  # last resort — will likely fail with error 700
-
-    # Send login request
-    login_resp = await page.evaluate(
-        """
-        async ({ loginUrl, username, enc }) => {
-            const body = "data=" + encodeURIComponent(JSON.stringify({
-                method: "login",
-                params: { username, password: enc },
-            }));
-            const res = await fetch(loginUrl, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                    "X-Requested-With": "XMLHttpRequest",
-                },
-                body,
-                credentials: "include",
-            });
-            return { ok: res.ok, status: res.status, text: await res.text() };
-        }
-        """,
-        {"loginUrl": login_url, "username": username, "enc": enc},
-    )
-
-    if not isinstance(login_resp, dict) or not login_resp.get("text"):
-        raise RouterLoginError("no_response", "No response from router login")
-
-    try:
-        data = json.loads(login_resp["text"])
-    except json.JSONDecodeError:
-        raise RouterLoginError("bad_json", f"Non-JSON login response: {login_resp['text'][:200]}")
-
-    err_code = str(data.get("error_code", ""))
-    if err_code and err_code != "0":
-        result_data = data.get("result") or {}
-        raise RouterLoginError(err_code, f"Router login error_code={err_code}", result_data if isinstance(result_data, dict) else {})
-
-    # Extract stok from the login response
-    stok = None
-    result_data = data.get("result")
-    if isinstance(result_data, dict):
-        stok = result_data.get("stok")
-
-    return stok
-
-
 # ── Parsing ──────────────────────────────────────────────────────────────────
 
 def _parse_dhcp_dict(data: dict) -> Optional[dict]:
@@ -232,9 +114,34 @@ def _parse_dhcp_dict(data: dict) -> Optional[dict]:
 
 # ── Persistence ──────────────────────────────────────────────────────────────
 
+async def _record_network_id_dhcp(db, host: Host, ip: str, mac: str | None):
+    """Upsert a row in host_network_ids for DHCP-discovered identity."""
+    now = datetime.utcnow()
+    result = await db.execute(
+        select(HostNetworkId).where(
+            HostNetworkId.host_id == host.id,
+            HostNetworkId.ip_address == ip,
+            HostNetworkId.mac_address == mac,
+        )
+    )
+    nid = result.scalar_one_or_none()
+    if nid:
+        nid.last_seen = now
+    else:
+        db.add(HostNetworkId(
+            host_id=host.id,
+            ip_address=ip,
+            mac_address=mac,
+            source="dhcp",
+            first_seen=now,
+            last_seen=now,
+        ))
+
+
 async def update_hosts_from_dhcp(entries: list[dict]) -> dict:
     """
     Update existing Host records and create new ones from DHCP data.
+    Lookup is by current_ip only — IP is the sole identity key.
     Returns dict: {"updated": int, "created": int}
     """
     if not entries:
@@ -267,17 +174,25 @@ async def update_hosts_from_dhcp(entries: list[dict]) -> dict:
             # Skip generic/empty hostnames
             is_valid_hostname = hostname and hostname not in ("*", "--", "N/A", "unknown", "")
 
-            # Try to find existing host by IP
             result = await db.execute(select(Host).where(Host.current_ip == ip))
             host = result.scalar_one_or_none()
 
-            # Fallback: try matching by MAC
+            # If no match by IP, check by MAC — the device may have gotten a new IP
             if not host and mac:
                 result = await db.execute(select(Host).where(Host.current_mac == mac))
                 host = result.scalar_one_or_none()
+                if host:
+                    # Record the IP change
+                    old_ip = host.current_ip
+                    host.current_ip = ip
+                    db.add(HostHistory(
+                        host_id=host.id,
+                        event_type="ip_change",
+                        old_value=old_ip,
+                        new_value=ip,
+                    ))
 
             if host:
-                # Update existing host
                 changed = False
 
                 if is_valid_hostname and host.hostname != hostname:
@@ -301,6 +216,8 @@ async def update_hosts_from_dhcp(entries: list[dict]) -> dict:
                         ))
                     host.current_mac = mac
                     changed = True
+
+                await _record_network_id_dhcp(db, host, ip, mac)
 
                 if changed:
                     updated += 1
@@ -327,6 +244,8 @@ async def update_hosts_from_dhcp(entries: list[dict]) -> dict:
                     last_seen=now,
                 )
                 db.add(new_host)
+                await db.flush()
+                await _record_network_id_dhcp(db, new_host, ip, mac)
                 created += 1
 
         await db.commit()

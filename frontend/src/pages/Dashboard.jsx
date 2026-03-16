@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts'
 import { Play, RefreshCw } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import api from '../api/client'
@@ -11,6 +11,22 @@ import { formatDate } from '../utils/format'
 const fetchDashboard = () => api.get('/dashboard').then(r => r.data)
 const fetchSubnets   = () => api.get('/subnets').then(r => r.data)
 const fetchProfiles  = () => api.get('/profiles').then(r => r.data)
+const fetchTrafficInterfaces = () => api.get('/traffic/interfaces').then(r => r.data)
+
+const DAILY_RANGE_OPTIONS = [
+  { label: '7d',  days: 7 },
+  { label: '30d', days: 30 },
+  { label: '90d', days: 90 },
+  { label: '1y',  days: 365 },
+  { label: '2y',  days: 730 },
+]
+
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.floor(Math.log(bytes) / Math.log(1024))
+  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`
+}
 
 function StatCard({ label, value, color = 'text-white', to }) {
   const inner = (
@@ -86,6 +102,7 @@ function ManualScanForm({ subnets, profiles, onJobStarted }) {
 export default function Dashboard() {
   const qc = useQueryClient()
   const [activeJobId, setActiveJobId] = useState(null)
+  const [dailyDays, setDailyDays] = useState(30)
 
   const { data: stats, isLoading } = useQuery({
     queryKey: ['dashboard'],
@@ -94,6 +111,16 @@ export default function Dashboard() {
   })
   const { data: subnets } = useQuery({ queryKey: ['subnets'], queryFn: fetchSubnets })
   const { data: profiles } = useQuery({ queryKey: ['profiles'], queryFn: fetchProfiles })
+  const { data: trafficInterfaces } = useQuery({
+    queryKey: ['traffic-interfaces'],
+    queryFn: fetchTrafficInterfaces,
+    refetchInterval: 60000,
+  })
+  const { data: dailyTraffic } = useQuery({
+    queryKey: ['traffic-daily', dailyDays],
+    queryFn: () => api.get(`/traffic/interfaces/daily?days=${dailyDays}`).then(r => r.data),
+    refetchInterval: 300000,
+  })
 
   const handleJobStarted = (jobId) => {
     setActiveJobId(jobId)
@@ -140,6 +167,86 @@ export default function Dashboard() {
 
       {/* Manual scan trigger */}
       <ManualScanForm subnets={subnets} profiles={profiles} onJobStarted={handleJobStarted} />
+
+      {/* Network Traffic */}
+      {trafficInterfaces && trafficInterfaces.length > 0 && (
+        <div className="bg-gray-900 rounded-xl p-5 border border-gray-800">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-gray-300">Network Traffic</h3>
+            <div className="flex gap-1">
+              {DAILY_RANGE_OPTIONS.map(opt => (
+                <button
+                  key={opt.days}
+                  onClick={() => setDailyDays(opt.days)}
+                  className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                    dailyDays === opt.days
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-800 text-gray-400 hover:text-white'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+            {trafficInterfaces.map(iface => (
+              <div key={iface.interface} className="space-y-1">
+                <div className="text-xs text-gray-500 uppercase tracking-wider">{iface.interface}</div>
+                <div className="text-sm">
+                  <span className="text-green-400">↑ {formatBytes(iface.bytes_sent)}</span>
+                  {' / '}
+                  <span className="text-blue-400">↓ {formatBytes(iface.bytes_recv)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          {dailyTraffic && dailyTraffic.length > 0 && (() => {
+            // Pivot daily data: one object per day with keys like "WAN_recv", "LAN_sent"
+            const byDay = {}
+            dailyTraffic.forEach(p => {
+              const d = p.day
+              if (!byDay[d]) byDay[d] = { day: d }
+              byDay[d][`${p.interface}_recv`] = p.bytes_recv
+              byDay[d][`${p.interface}_sent`] = p.bytes_sent
+            })
+            const chartData = Object.values(byDay)
+            const interfaces = [...new Set(dailyTraffic.map(p => p.interface))]
+            const recvColors = ['#3b82f6', '#a855f7', '#06b6d4', '#f59e0b']
+            const sentColors = ['#22c55e', '#eab308', '#10b981', '#ef4444']
+            return (
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={chartData}>
+                  <XAxis
+                    dataKey="day"
+                    tick={{ fill: '#9ca3af', fontSize: 10 }}
+                    tickFormatter={v => {
+                      const d = new Date(v + 'T00:00:00')
+                      return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+                    }}
+                  />
+                  <YAxis tick={{ fill: '#9ca3af', fontSize: 10 }} tickFormatter={formatBytes} />
+                  <Tooltip
+                    contentStyle={{ background: '#111827', border: '1px solid #374151', borderRadius: 8 }}
+                    formatter={(v) => formatBytes(v)}
+                    labelFormatter={v => {
+                      const d = new Date(v + 'T00:00:00')
+                      return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
+                    }}
+                  />
+                  <Legend />
+                  {interfaces.map((iface, i) => (
+                    <Bar key={`${iface}_recv`} dataKey={`${iface}_recv`} name={`${iface} ↓`} stackId={iface} fill={recvColors[i % recvColors.length]} />
+                  ))}
+                  {interfaces.map((iface, i) => (
+                    <Bar key={`${iface}_sent`} dataKey={`${iface}_sent`} name={`${iface} ↑`} stackId={iface} fill={sentColors[i % sentColors.length]} radius={[2, 2, 0, 0]} />
+                  ))}
+                </BarChart>
+              </ResponsiveContainer>
+            )
+          })()}
+        </div>
+      )}
 
       {/* Subnet chart */}
       {chartData.length > 0 && (

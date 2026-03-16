@@ -12,6 +12,7 @@ import Profiles from './pages/Profiles'
 import Schedules from './pages/Schedules'
 import ScanJobs from './pages/ScanJobs'
 import Settings from './pages/Settings'
+import WirelessAPs from './pages/WirelessAPs'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -36,6 +37,7 @@ export default function App() {
                 <Route path="/profiles" element={<Profiles />} />
                 <Route path="/schedules" element={<Schedules />} />
                 <Route path="/scans" element={<ScanJobs />} />
+                <Route path="/wireless-aps" element={<WirelessAPs />} />
                 <Route path="/settings" element={<Settings />} />
               </Route>
             </Route>

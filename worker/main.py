@@ -10,13 +10,13 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import ipaddress
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from sqlalchemy import select
 
 from shared.db import AsyncSessionLocal
 from shared.models import (
     ScanJob, Subnet, ScanProfile, Host, HostPort,
-    PortBanner, PortScreenshot, HostHistory
+    PortBanner, PortScreenshot, HostHistory, HostNetworkId
 )
 from worker.queue import job_queue
 from worker.pipeline import (
@@ -38,24 +38,48 @@ SCREENSHOT_DIR = os.getenv(
 )
 
 
+# ── Network Identity Helper ───────────────────────────────────────────────────
+
+async def _record_network_id(db, host: Host, ip: str, mac: str | None, source: str = "scan"):
+    """Upsert a row in host_network_ids for this host/ip/mac combination."""
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        select(HostNetworkId).where(
+            HostNetworkId.host_id == host.id,
+            HostNetworkId.ip_address == ip,
+            HostNetworkId.mac_address == mac,
+        )
+    )
+    nid = result.scalar_one_or_none()
+    if nid:
+        nid.last_seen = now
+    else:
+        db.add(HostNetworkId(
+            host_id=host.id,
+            ip_address=ip,
+            mac_address=mac,
+            source=source,
+            first_seen=now,
+            last_seen=now,
+        ))
+
+
 # ── Host Identity Resolution ──────────────────────────────────────────────────
 
-async def resolve_host(db, ip: str, hostname: str | None, mac: str | None) -> tuple[Host, bool]:
+async def resolve_host(db, ip: str, hostname: str | None, mac: str | None, **_kwargs) -> tuple[Host, bool]:
     """
     Find or create a Host record. Returns (host, is_new).
-    Primary identity: hostname (if available), then IP.
-    Logs IP/MAC drift to host_history.
+    Lookup is by current_ip only — IP is the sole identity key.
+    MAC and hostname are updated on the matched record but never used to
+    match across different IPs (that caused incorrect host merges).
     """
     host = None
     is_new_host = False
 
-    if hostname:
-        result = await db.execute(select(Host).where(Host.hostname == hostname))
-        host = result.scalar_one_or_none()
-
-    if not host:
-        result = await db.execute(select(Host).where(Host.current_ip == ip))
-        host = result.scalar_one_or_none()
+    result = await db.execute(
+        select(Host).where(Host.current_ip == ip)
+    )
+    host = result.scalar_one_or_none()
 
     now = datetime.now(timezone.utc)
 
@@ -74,16 +98,6 @@ async def resolve_host(db, ip: str, hostname: str | None, mac: str | None) -> tu
         is_new_host = True
         logger.info(f"New host: {hostname or ip}")
     else:
-        # Detect drift
-        if host.current_ip != ip:
-            db.add(HostHistory(
-                host_id=host.id,
-                event_type="ip_change",
-                old_value=host.current_ip,
-                new_value=ip,
-            ))
-            host.current_ip = ip
-
         if mac and host.current_mac != mac:
             db.add(HostHistory(
                 host_id=host.id,
@@ -112,6 +126,8 @@ async def resolve_host(db, ip: str, hostname: str | None, mac: str | None) -> tu
 
         host.is_up = True
         host.last_seen = now
+
+    await _record_network_id(db, host, ip, mac, source="scan")
 
     return host, is_new_host
 
@@ -169,6 +185,74 @@ async def persist_ports(db, host: Host, ports: list, job_id: int) -> tuple[int, 
             ))
 
     return new_ports, open_ports
+
+
+# ── Offline Detection ─────────────────────────────────────────────────────
+
+async def _mark_offline(cidrs: list[str], seen_host_ids: set[int], job_id: int):
+    """
+    Mark hosts in the scanned subnets as offline if they weren't seen.
+    For merged hosts (primary with aliases), the primary only goes offline
+    if none of the alias IPs responded either.
+    """
+    from sqlalchemy.orm import selectinload
+
+    # Build the set of scanned networks
+    networks = []
+    for cidr in cidrs:
+        try:
+            networks.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            continue
+    if not networks:
+        return
+
+    now = datetime.now(timezone.utc)
+
+    async with AsyncSessionLocal() as db:
+        # Get all hosts that are currently up
+        result = await db.execute(
+            select(Host)
+            .options(selectinload(Host.aliases))
+            .where(Host.is_up == True, Host.primary_host_id.is_(None))
+        )
+        up_hosts = result.scalars().all()
+
+        marked_down = 0
+        for host in up_hosts:
+            # Check if the host's IP is in any of the scanned subnets
+            try:
+                host_addr = ipaddress.ip_address(host.current_ip)
+            except ValueError:
+                continue
+            in_scanned_subnet = any(host_addr in net for net in networks)
+            if not in_scanned_subnet:
+                continue
+
+            if host.id in seen_host_ids:
+                continue
+
+            # For merged hosts: check if any alias was seen
+            if host.aliases:
+                alias_seen = any(a.id in seen_host_ids for a in host.aliases)
+                if alias_seen:
+                    continue
+
+            # Mark offline
+            host.is_up = False
+            db.add(HostHistory(
+                host_id=host.id,
+                event_type="status_change",
+                old_value="up",
+                new_value="down",
+                scan_job_id=job_id,
+                recorded_at=now,
+            ))
+            marked_down += 1
+
+        if marked_down:
+            await db.commit()
+            logger.info(f"[Job {job_id}] Marked {marked_down} host(s) as offline")
 
 
 # ── Main Job Runner ───────────────────────────────────────────────────────────
@@ -240,9 +324,14 @@ async def run_job(job_id: int):
             try:
                 network = ipaddress.ip_network(cidr, strict=False)
                 async with AsyncSessionLocal() as db:
-                    result = await db.execute(select(Host.current_ip))
-                    for (ip_str,) in result.all():
-                        if ip_str and ip_str not in live_set:
+                    # Only use current_ip — not historical network_ids — to avoid
+                    # scanning stale IPs that now belong to different devices.
+                    candidate_ips: set[str] = {
+                        ip_str for (ip_str,) in (await db.execute(select(Host.current_ip))).all()
+                        if ip_str
+                    }
+                    for ip_str in candidate_ips:
+                        if ip_str not in live_set:
                             try:
                                 if ipaddress.ip_address(ip_str) in network:
                                     known_ips.append(ip_str)
@@ -259,27 +348,19 @@ async def run_job(job_id: int):
                 logger.info(f"[Job {job_id}] No hosts to scan in {cidr}")
                 continue
 
-            # Tier 2 + 3: TCP and UDP in parallel (UDP optional)
-            tcp_task = asyncio.create_task(
-                tier2_tcp_scan(scan_ips, profile.port_range, job_id, profile.max_concurrency)
-            )
-            udp_task = (
-                asyncio.create_task(
-                    tier3_udp_scan(scan_ips, profile.port_range, job_id, profile.max_concurrency)
-                )
-                if profile.enable_udp
-                else None
-            )
+            # Tier 2: TCP scan first (fast with -T4)
+            tcp_results = {}
+            if profile.enable_tcp_syn:
+                tcp_results = await tier2_tcp_scan(scan_ips, profile.port_range, job_id, profile.max_concurrency)
 
-            if udp_task:
-                tcp_results, udp_results = await asyncio.gather(tcp_task, udp_task)
+            # Tier 3: UDP scan after TCP completes (slow, resource-heavy)
+            if profile.enable_udp:
+                udp_results = await tier3_udp_scan(scan_ips, profile.port_range, job_id, profile.max_concurrency)
                 for ip, data in udp_results.items():
                     if ip in tcp_results:
                         tcp_results[ip]["ports"].extend(data["ports"])
                     else:
                         tcp_results[ip] = data
-            else:
-                tcp_results = await tcp_task
 
             all_results.update(tcp_results)
 
@@ -314,21 +395,29 @@ async def run_job(job_id: int):
         # the ARP cache is populated by any network traffic and needs no privileges.
         arp_cache = read_arp_cache()
 
+        # Ensure every host that responded to the ping sweep is persisted, even if
+        # the TCP scan found no open ports (which happens when --open filters them out).
+        for ip in all_live_ips:
+            if ip not in all_results:
+                all_results[ip] = {"ip": ip, "mac": None, "hostname": None, "vendor": None, "ports": [], "os_guess": None}
+
         # Persist hosts and ports
         total_new_hosts = 0
         total_new_ports = 0
         total_hosts_up = 0
         web_targets = []
+        seen_host_ids: set[int] = set()
 
         async with AsyncSessionLocal() as db:
-            for ip, data in all_results.items():
+            for ip in all_results:
+                data = all_results[ip]
                 mac = data.get("mac") or arp_cache.get(ip)
                 hostname = data.get("hostname") or resolve_hostname(ip)
-                host, is_new = await resolve_host(
-                    db, ip, hostname, mac
-                )
+
+                host, is_new = await resolve_host(db, ip, hostname, mac)
                 host.os_guess = data.get("os_guess") or host.os_guess
                 host.vendor = data.get("vendor") or host.vendor
+                seen_host_ids.add(host.id)
 
                 new_p, open_p = await persist_ports(db, host, data.get("ports", []), job_id)
                 total_new_ports += new_p
@@ -349,6 +438,9 @@ async def run_job(job_id: int):
                             web_targets.append({"ip": ip, "port": port_num, "protocol": protocol})
 
             await db.commit()
+
+        # Mark unseen hosts in scanned subnets as offline
+        await _mark_offline(cidrs, seen_host_ids, job_id)
 
         # Enrich hostnames from router DHCP table
         try:
@@ -432,6 +524,40 @@ async def run_job(job_id: int):
                 job.completed_at = datetime.now(timezone.utc)
                 await db.commit()
         await broadcast(job_id, {"type": "job_done", "job_id": job_id, "status": "failed", "error": str(e)})
+
+
+# ── Stale Host Cleanup ────────────────────────────────────────────────────────
+
+STALE_HOST_HOURS = 24
+CLEANUP_INTERVAL_SECONDS = 3600  # run once per hour
+
+
+async def stale_host_cleanup_loop():
+    """
+    Periodically delete hosts (and all cascaded child records) that have not
+    been seen in the last STALE_HOST_HOURS hours.  Targets random-MAC transient
+    devices that would otherwise accumulate indefinitely.
+    """
+    logger.info("Stale host cleanup task started")
+    while True:
+        try:
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=STALE_HOST_HOURS)
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(Host).where(Host.last_seen < cutoff)
+                )
+                stale = result.scalars().all()
+                if not stale:
+                    continue
+                for host in stale:
+                    await db.delete(host)
+                await db.commit()
+                logger.info(f"Stale host cleanup: deleted {len(stale)} host(s) not seen since {cutoff.date()}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"Stale host cleanup error: {e}")
+        await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
 
 
 # ── Worker Loop ───────────────────────────────────────────────────────────────

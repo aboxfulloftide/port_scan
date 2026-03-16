@@ -21,5 +21,16 @@ class Settings:
     ROUTER_DHCP_PATH: str = os.getenv("ROUTER_DHCP_PATH", "")
     DHCP_SCRAPE_INTERVAL_MIN: int = int(os.getenv("DHCP_SCRAPE_INTERVAL_MIN", 30))
 
+    # Traffic statistics scraper
+    TRAFFIC_SCRAPE_INTERVAL_MIN: int = int(os.getenv("TRAFFIC_SCRAPE_INTERVAL_MIN", 30))
+
+    # Traffic data retention
+    INTERFACE_TRAFFIC_RETENTION_DAYS: int = int(os.getenv("INTERFACE_TRAFFIC_RETENTION_DAYS", 730))
+    HOST_TRAFFIC_RETENTION_DAYS: int = int(os.getenv("HOST_TRAFFIC_RETENTION_DAYS", 30))
+
+    # Wireless AP scraper
+    ENCRYPTION_KEY: str = os.getenv("ENCRYPTION_KEY", "")
+    WIRELESS_SCRAPE_INTERVAL_MIN: int = int(os.getenv("WIRELESS_SCRAPE_INTERVAL_MIN", 5))
+
 
 settings = Settings()
